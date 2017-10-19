@@ -4,6 +4,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <stdlib.h>
+#include <string.h>
 
 /** Check if a string consists solely of an integer number.
  *
@@ -26,7 +27,7 @@ isint(const char *s) {
 struct nslist {
     ino_t inode;
     pid_t pid;
-    const char *path;
+    char *path;
     struct nslist *next;
 };
 
@@ -48,7 +49,7 @@ nslistAddUnique(struct nslist **head, ino_t id, pid_t pid, const char *path)
             list->inode = id;
             list->next = NULL;
             list->pid = pid;
-            list->path = path;
+            list->path = path ? strdup(path) : NULL;
             *head = list;
         }
         return;
@@ -62,7 +63,7 @@ nslistAddUnique(struct nslist **head, ino_t id, pid_t pid, const char *path)
                 list->pid = pid;
             }
             if (!list->path) {
-                list->path = path;
+                list->path = path ? strdup(path) : NULL;
             }
             return;
         }
@@ -74,12 +75,45 @@ nslistAddUnique(struct nslist **head, ino_t id, pid_t pid, const char *path)
                 list->inode = id;
                 list->next = NULL;
                 list->pid = pid;
-                list->path = path;
+                list->path = path ? strdup(path) : NULL;
             }
             return;
         }
         list = list->next;
     }
+}
+
+/** Allocate a new string containing a line from the opened file.
+ *
+ * Caller is responsible for freeing the returned string.
+ *
+ * quick-and-dirty implementation. Hopes that fread does its own buffering
+ * of the input.
+ */
+char *
+readline(FILE *file)
+{
+    /* TODO: We could dynamically grow the size of the line, possibly with
+     * a limit to make sure we don't exceed reasonable memory usage.
+     */
+#define MAXLINE 512
+    char *ret = malloc(MAXLINE);
+    int i;
+    for (i = 0; i < MAXLINE; i++) {
+        size_t fret = fread(&ret[i], 1, 1, file);
+        if (fret != 1) {
+            /* EOF or error. Incomplete line either way */
+            free(ret);
+            return NULL;
+        }
+        if (ret[i] == '\n') {
+            ret[i] = '\0';
+            return ret;
+        }
+    }
+    /* MAX size exceeded; bail */
+    free(ret);
+    return NULL;
 }
 
 int main()
@@ -108,6 +142,7 @@ int main()
         return 1;
     }
 
+    /* Scan PIDs */
     struct dirent *entry;
     while (entry = readdir(dir)) {
         if (isint(entry->d_name)) {
@@ -123,12 +158,59 @@ int main()
             }
         }
     }
-    /* TODO: Also look for nsfs mounts */
+    closedir(dir);
+
+    /* Look for nsfs mounts */
+    FILE *mounts = fopen("/proc/mounts", "r");
+    if (!mounts) {
+        perror("Couldn't open /proc/mounts");
+    } else {
+        char *line;
+        char *s;
+        while (line = readline(mounts)) {
+            if (strncmp("nsfs ", line, 5) == 0) {
+                /* /proc/mounts is space separated containing source, mount
+                 * path, type, options, and 2 '0's so that it looks like
+                 * the dump and fsck order values.
+                 *
+                 * But what if the source or mount point has spaces in it?
+                 * Well, this file escapes spaces and possibly other
+                 * values. E.g. the mount point "this is a test" is
+                 * rendered as "this\040is\040a\040test". This means that
+                 * after we find the mountpoint, we then have to un-escape
+                 * the data. On the upside, we know that it will be
+                 * smaller, so we can simply allocate the full size of the
+                 * string.
+                 */
+                /* Could maybe use strsep instead? */
+                char *mountpoint = line + 5;
+                s = strchr(mountpoint, ' ');
+                if (!s) {
+                    fprintf(stderr, "Failure parsing /proc/mounts\n");
+                    break;
+                }
+                *s = '\0';
+                res = stat(mountpoint, &stats);
+                if (res == 0) {
+                    /* TODO: Also test that this is, in fact, a network
+                     * namespace by using setns()
+                     */
+                    nslistAddUnique(&netHead, stats.st_ino, 0, mountpoint);
+                }
+            }
+            free(line);
+        }
+        fclose(mounts);
+    }
+
+
+
+    /* Display results */
     struct nslist *list = netHead;
     struct nslist *last = NULL;
     while (list) {
         if (list->pid && list->path) {
-            printf("%lx (%li) via %i %s\n", list->inode, list->inode, list->pid, list->path);
+            printf("%lx (%li) via %i or %s\n", list->inode, list->inode, list->pid, list->path);
         } else if (list->pid) {
             printf("%lx (%li) via %i\n", list->inode, list->inode, list->pid);
         } else if (list->path) {
@@ -137,12 +219,13 @@ int main()
             /* shouldn't reach here */
             printf("%lx (%li) via <unknown>\n", list->inode, list->inode);
         }
-        //last = list;
+        last = list;
         list = list->next;
-        //free(last);
+        if (last->path) {
+            free(last->path);
+        }
+        free(last);
     }
-
-    closedir(dir);
     return 0;
 }
 
