@@ -120,6 +120,43 @@ readline(FILE *file)
     return NULL;
 }
 
+/** Check if a path is a valid network namespace.
+ *
+ * @retval 1 path references a network namespace
+ * @retval 0 path doesn't reference a network namespace, or an error
+ * occured trying to find out.
+ * @note This function has the side affect of placing the program into the
+ * network namespace it is testing.
+ * @todo This function could cache its original network namespace and
+ * restore it.
+ */
+static int
+isNetNs(const char *mountpoint)
+{
+    int ret = 0;
+    int fd = open(mountpoint, O_RDONLY);
+    if (fd < 0) {
+        perror("failed to open");
+        errno = 0;
+        return 0;
+    }
+    int nsret = setns(fd, CLONE_NEWNET);
+    if (nsret == 0) {
+        ret = 1;
+    } else {
+        if (errno != EINVAL) {
+            /* INVAL can mean it isn't a network type
+             * namespace, so no need to print warnings
+             * about that.
+             */
+            fprintf(stderr, "Couldn't check netns %s: %s\n", mountpoint, strerror(errno));
+        }
+        errno = 0;
+    }
+    close(fd);
+    return ret;
+}
+
 int main()
 {
     /* TODO: Need to enumerate /proc/mounts for nsfs, and search also mount
@@ -198,27 +235,9 @@ int main()
                 *s = '\0';
                 res = stat(mountpoint, &stats);
                 if (res == 0) {
-                    int fd = open(mountpoint, O_RDONLY);
-                    if (fd < 0) {
-                        perror("failed to open");
-                        free(line);
-                        errno = 0;
-                        continue;
-                    }
-                    int nsret = setns(fd, CLONE_NEWNET);
-                    if (nsret == 0) {
+                    if (isNetNs(mountpoint)) {
                         nslistAddUnique(&netHead, stats.st_ino, 0, mountpoint);
-                    } else {
-                        if (errno != EINVAL) {
-                            /* INVAL can mean it isn't a network type
-                             * namespace, so no need to print warnings
-                             * about that.
-                             */
-                            fprintf(stderr, "Couldn't check netns %s: %s\n", mountpoint, strerror(errno));
-                        }
-                        errno = 0;
                     }
-                    close(fd);
                 }
             }
             free(line);
