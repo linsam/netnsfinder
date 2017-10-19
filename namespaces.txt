@@ -1,0 +1,42 @@
+There are at least 2 ways to keep a namespace alive:
+
+  - at least one running process as a member
+
+  - nsfs mount (bind-mounting the ns)
+
+The latter is used by both the 'ip' command and 'docker' for holding network
+namespaces whether or not a process might be using it.
+
+The best way to find all (or most, if there are other ways as well) network
+namespaces is to thus iterate through PIDs and also through nsfs mounts. 
+
+'ip' puts its mounts at /run/netns.
+docker puts its mounts at /run/docker/netns
+
+Other tools (and users) may put them in yet other places, so to enumerate
+them, we'll look for nsfs type mounts in /proc/mounts. E.g.
+
+    $ grep nsfs /proc/mounts
+    nsfs /run/docker/netns/ingress_sbox nsfs rw 0 0
+    nsfs /run/docker/netns/1-c1itwam2i1 nsfs rw 0 0
+    nsfs /run/docker/netns/07a20e70c6af nsfs rw 0 0
+    nsfs /run/netns/testnet nsfs rw 0 0
+    nsfs /run/netns/testnet nsfs rw 0 0
+
+Note that /run/netns/testnet appears twice.
+
+Even more fun, though, is that there are mount namespaces. It seems possible,
+though I haven't tried it yet, to do the nsfs bind mount within a mount
+namespace that isn't available in the parent namespace.
+
+On the upside, presumably one cannot create mutually cross-mounted mount
+namespaces (I assume it is strictly hierarchical, might be fun to try to
+break), and even though pid namespaces exist, all child pids are still visible
+from the parent. As such, we should also be able to enumerate all mount
+namespaces via pid enumeration, and then check for nsfs within each mount
+namespace. We may need to recursivly to it for the mount namespace.
+    e.g. pid 502 has a mount namespace that has another mount namespace
+    bind-mounted at /run/mntns/blah, and that mount namespace has a netns
+    bind-mounted at /run/netns/whatever.
+
+
