@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -5,6 +6,9 @@
 #include <dirent.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
+#include <sched.h>
+#include <errno.h>
 
 /** Check if a string consists solely of an integer number.
  *
@@ -164,6 +168,7 @@ int main()
     FILE *mounts = fopen("/proc/mounts", "r");
     if (!mounts) {
         perror("Couldn't open /proc/mounts");
+        errno = 0;
     } else {
         char *line;
         char *s;
@@ -187,15 +192,33 @@ int main()
                 s = strchr(mountpoint, ' ');
                 if (!s) {
                     fprintf(stderr, "Failure parsing /proc/mounts\n");
+                    free(line);
                     break;
                 }
                 *s = '\0';
                 res = stat(mountpoint, &stats);
                 if (res == 0) {
-                    /* TODO: Also test that this is, in fact, a network
-                     * namespace by using setns()
-                     */
-                    nslistAddUnique(&netHead, stats.st_ino, 0, mountpoint);
+                    int fd = open(mountpoint, O_RDONLY);
+                    if (fd < 0) {
+                        perror("failed to open");
+                        free(line);
+                        errno = 0;
+                        continue;
+                    }
+                    int nsret = setns(fd, CLONE_NEWNET);
+                    if (nsret == 0) {
+                        nslistAddUnique(&netHead, stats.st_ino, 0, mountpoint);
+                    } else {
+                        if (errno != EINVAL) {
+                            /* INVAL can mean it isn't a network type
+                             * namespace, so no need to print warnings
+                             * about that.
+                             */
+                            fprintf(stderr, "Couldn't check netns %s: %s\n", mountpoint, strerror(errno));
+                        }
+                        errno = 0;
+                    }
+                    close(fd);
                 }
             }
             free(line);
