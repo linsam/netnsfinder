@@ -80,6 +80,11 @@ simply run make:
   short-lived task in a container that no longer exists after it is displayed.
 
 
+* If a process is holding a file descriptor for a network namespace, but is
+  not part of that namespace, and the namespace isn't bind-mounted anywhere,
+  this program won't find it.
+
+
 # Future work
 
 On the upside, with current kernels it seems impossible to bind-mount a mount
