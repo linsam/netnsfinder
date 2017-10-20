@@ -10,6 +10,13 @@
 #include <sched.h>
 #include <errno.h>
 
+struct nslist;
+
+static int scanPIDs(struct nslist **netHead);
+static int scanMount(struct nslist **netHead);
+static void displayResults(struct nslist *netHead);
+static void cleanNsList(struct nslist **listHead);
+
 /** Check if a string consists solely of an integer number.
  *
  * @retval 1 is a number only
@@ -36,6 +43,7 @@ struct nslist {
 };
 
 struct nslist *netHead = NULL;
+struct nslist *mntHead = NULL;
 
 /* Add an entry to the list if it doesn't already exist.
  *
@@ -160,7 +168,7 @@ isNetNs(const char *mountpoint)
 int main()
 {
     /* TODO: Need to enumerate /proc/mounts for nsfs, and search also mount
-     * namespaces py pid and then by proc/mounts recursively
+     * namespaces by pid and then by proc/mounts recursively
      *
      * For now, we'll just list netns visible to the parent via direct
      * mount and pid.
@@ -177,6 +185,20 @@ int main()
 
     //printf("%i %lx\n", res, stats.st_ino);
 
+    if (scanPIDs(&netHead) != 0) {
+        return 1;
+    }
+    scanMount(&netHead);
+    displayResults(netHead);
+    cleanNsList(&netHead);
+    return 0;
+}
+
+static int
+scanPIDs(struct nslist **netHead)
+{
+    int res;
+    struct stat stats;
     DIR *dir = opendir("/proc");
     if (!dir) {
         perror("couldn't open proc");
@@ -192,15 +214,19 @@ int main()
             path[255] = '\0';
             res = stat(path, &stats);
             if (res == 0) {
-                if (stats.st_ino != netnsinode) {
-                    //printf(" %s -> %lx\n", entry->d_name, stats.st_ino);
-                    nslistAddUnique(&netHead, stats.st_ino, atoi(entry->d_name), NULL);
-                }
+                nslistAddUnique(netHead, stats.st_ino, atoi(entry->d_name), NULL);
             }
         }
     }
     closedir(dir);
+    return 0;
+}
 
+static int
+scanMount(struct nslist **netHead)
+{
+    int res;
+    struct stat stats;
     /* Look for nsfs mounts */
     FILE *mounts = fopen("/proc/mounts", "r");
     if (!mounts) {
@@ -236,7 +262,7 @@ int main()
                 res = stat(mountpoint, &stats);
                 if (res == 0) {
                     if (isNetNs(mountpoint)) {
-                        nslistAddUnique(&netHead, stats.st_ino, 0, mountpoint);
+                        nslistAddUnique(netHead, stats.st_ino, 0, mountpoint);
                     }
                 }
             }
@@ -244,12 +270,15 @@ int main()
         }
         fclose(mounts);
     }
+    return 0;
+}
 
-
+static void
+displayResults(struct nslist *netHead)
+{
 
     /* Display results */
     struct nslist *list = netHead;
-    struct nslist *last = NULL;
     while (list) {
         if (list->pid && list->path) {
             printf("%lx (%li) via %i or %s\n", list->inode, list->inode, list->pid, list->path);
@@ -261,6 +290,16 @@ int main()
             /* shouldn't reach here */
             printf("%lx (%li) via <unknown>\n", list->inode, list->inode);
         }
+        list = list->next;
+    }
+}
+
+static void
+cleanNsList(struct nslist **listHead)
+{
+    struct nslist *list = *listHead;
+    struct nslist *last = NULL;
+    while (list) {
         last = list;
         list = list->next;
         if (last->path) {
@@ -268,6 +307,5 @@ int main()
         }
         free(last);
     }
-    return 0;
+    *listHead = NULL;
 }
-
