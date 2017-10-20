@@ -10,6 +10,8 @@ then gives a way to access it, either via PID number, mountpoint, or both.
 # Example
 
     $ sudo ./netnsfinder
+    Couldn't open /proc/mounts under /proc/46/ns/mnt: No such file or directory
+    Couldn't open /proc/mounts under /proc/4669/ns/mnt: No such file or directory
     f000007b (4026531963) via 1
     f00001f1 (4026532337) via 1820
     f0000261 (4026532449) via 3770
@@ -19,15 +21,27 @@ then gives a way to access it, either via PID number, mountpoint, or both.
     f0000328 (4026532648) via /run/docker/netns/1-c1itwam2i1
     f0000402 (4026532866) via /run/netns/testnet
     f0000462 (4026532962) via /tmp/my_net_bindmount
+    f00004c2 (4026533058) via /tmp/blah (via /proc/18597/ns/mnt)
+
+(We see a couple errors displayed. This indicates that there might be network
+namespaces under mount namespaces (in the example, under PIDs 46 and 4669)
+that we can't see.)
 
 This shows several network namespaces. The first always exists, the network
 namespace of init. Next in the above list are 4 namespaces reachable by a
-process running in them. One of those is also a bind-mount by docker, which
-indicates that pid is probably a container/contained process.
+process running in them (1820, 3770, 4669, and 14885). One of those is also a
+bind-mount by docker, which indicates that pid is probably a container or
+contained process.
 
-After that are 2 docker bind-mounts and one ip bind-mount ("ip netns...").
+After that are 2 docker bind-mounts (ingress_sbox and 1-c1itwam2i1.
 
-Finally, one bind-mount by-hand namespace.
+After that is one ip bind-mount (made with "ip netns add...") called testnet
+
+After that, one bind-mount by-hand namespace (/tmp/my_net_bindmount).
+
+Finally, there is a hand mounted namespace at /tmp/blah, but not visible in
+the current mount namespace. It is at least visible via the mount namespace of
+PID 18597.
 
 For names under /run/netns (in this example: "testnet"), one can use the ip
 command directly to inspect the network of the namespace.
@@ -51,6 +65,12 @@ list interfaces of given mountpoint:
 
     $ nsenter --net=/run/docker/netns/ingress_show ip link show
 
+The sub namespaces are more complicated. You need to nsenter the outer mount
+namespace to then nsenter the contained net namespace before running the
+actual command:
+
+    $ nsenter --mount=/proc/18597/ns/mnt nsenter --net=/tmp/blah ip link show
+
 
 # Building the project
 
@@ -66,11 +86,8 @@ simply run make:
 
 * If a network namespace is bindmounted in a mount namespace that isn't shared
   in the current namespace, and there are no processes holding that network
-  namespace, then this program currently won't find it.
-
-  This can especially happen when a container (e.g. lxc) is itself using
-  network namespaces that have no running processes. This program would find
-  it when run within the container, but not from the host.
+  namespace, and that mount namespace doesn't have /proc mounted, then this
+  program currently won't find it.
 
 
 * Only the first PID (and mountpoint) found is displayed for each network
@@ -87,6 +104,7 @@ simply run make:
 
 # Future work
 
-On the upside, with current kernels it seems impossible to bind-mount a mount
-namespace, so future detection of the above should only involve a separate PID
-walk looking for mount namespaces.
+When scanning mount namespaces, if we find one that doesn't have proc mounted,
+the unshare that mount namespace and try to mount /proc ourselves. This could
+possibly be tharted by the namespace having /proc as a regular file, or
+lacking a /proc and having a read only root.

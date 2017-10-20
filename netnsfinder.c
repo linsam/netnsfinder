@@ -12,8 +12,9 @@
 
 struct nslist;
 
-static int scanPIDs(struct nslist **netHead);
-static int scanMount(struct nslist **netHead);
+static int scanPIDs(struct nslist **netHead, struct nslist **mntHead);
+static int scanMounts(struct nslist *mntHead, struct nslist **netHead);
+static int scanMount(struct nslist **netHead, const char *mntnspath);
 static void displayResults(struct nslist *netHead);
 static void cleanNsList(struct nslist **listHead);
 
@@ -39,6 +40,7 @@ struct nslist {
     ino_t inode;
     pid_t pid;
     char *path;
+    char *mntnspath;
     struct nslist *next;
 };
 
@@ -49,9 +51,11 @@ struct nslist *mntHead = NULL;
  *
  * If it does already exist (identified by inode), will fill in the pid or
  * path if given and not already present.
+ *
+ * \p mntnspath is where the mount namespace is for the \p path
  */
 void
-nslistAddUnique(struct nslist **head, ino_t id, pid_t pid, const char *path)
+nslistAddUnique(struct nslist **head, ino_t id, pid_t pid, const char *path, const char *mntnspath)
 {
     struct nslist *list;
     if (!*head) {
@@ -62,6 +66,7 @@ nslistAddUnique(struct nslist **head, ino_t id, pid_t pid, const char *path)
             list->next = NULL;
             list->pid = pid;
             list->path = path ? strdup(path) : NULL;
+            list->mntnspath = mntnspath ? strdup(mntnspath) : NULL;
             *head = list;
         }
         return;
@@ -76,6 +81,7 @@ nslistAddUnique(struct nslist **head, ino_t id, pid_t pid, const char *path)
             }
             if (!list->path) {
                 list->path = path ? strdup(path) : NULL;
+                list->mntnspath = mntnspath ? strdup(mntnspath) : NULL;
             }
             return;
         }
@@ -88,6 +94,7 @@ nslistAddUnique(struct nslist **head, ino_t id, pid_t pid, const char *path)
                 list->next = NULL;
                 list->pid = pid;
                 list->path = path ? strdup(path) : NULL;
+                list->mntnspath = mntnspath ? strdup(mntnspath) : NULL;
             }
             return;
         }
@@ -181,21 +188,25 @@ int main()
         return 1;
     }
     ino_t netnsinode = stats.st_ino;
-    nslistAddUnique(&netHead, stats.st_ino, 1, NULL);
+    nslistAddUnique(&netHead, stats.st_ino, 1, NULL, NULL);
 
     //printf("%i %lx\n", res, stats.st_ino);
 
-    if (scanPIDs(&netHead) != 0) {
+    if (scanPIDs(&netHead, &mntHead) != 0) {
         return 1;
     }
-    scanMount(&netHead);
+    scanMount(&netHead, NULL);
+    scanMounts(mntHead, &netHead);
     displayResults(netHead);
+    //printf("----------\n");
+    //displayResults(mntHead);
     cleanNsList(&netHead);
+    cleanNsList(&mntHead);
     return 0;
 }
 
 static int
-scanPIDs(struct nslist **netHead)
+scanPIDs(struct nslist **netHead, struct nslist **mntHead)
 {
     int res;
     struct stat stats;
@@ -214,7 +225,13 @@ scanPIDs(struct nslist **netHead)
             path[255] = '\0';
             res = stat(path, &stats);
             if (res == 0) {
-                nslistAddUnique(netHead, stats.st_ino, atoi(entry->d_name), NULL);
+                nslistAddUnique(netHead, stats.st_ino, atoi(entry->d_name), NULL, NULL);
+            }
+            snprintf(path, 255, "/proc/%s/ns/mnt", entry->d_name);
+            path[255] = '\0';
+            res = stat(path, &stats);
+            if (res ==  0) {
+                nslistAddUnique(mntHead, stats.st_ino, atoi(entry->d_name), path, NULL);
             }
         }
     }
@@ -222,15 +239,64 @@ scanPIDs(struct nslist **netHead)
     return 0;
 }
 
+/** Iterate through list of mount namespaces, adding found net namespaces
+ * within.
+ */
 static int
-scanMount(struct nslist **netHead)
+scanMounts(struct nslist *mntHead, struct nslist **netHead)
+{
+    int top = open("/proc/1/ns/mnt", O_RDONLY);
+    if (top < 0) {
+        perror("failed to save top mount namespace");
+        return 1;
+    }
+    for(; mntHead; mntHead = mntHead->next) {
+        if (mntHead->pid == 1) {
+            continue;
+        }
+        //fprintf(stderr, "checking %s\n", mntHead->path);
+        int ns = open(mntHead->path, O_RDONLY);
+        if (ns < 0) {
+            /* TODO: Warning? */
+            continue;
+        }
+        int nsret = setns(ns, CLONE_NEWNS);
+        if (nsret != 0) {
+            perror("Failed to switch namespace");
+            close(ns);
+            continue;
+        }
+        close(ns);
+        /* Now, do our normal thing... */
+        scanMount(netHead, mntHead->path);
+
+        /* Return to top, so that we can open the next one. This is mainly
+         * to avoid getting stuck with someone else's PID namespace in
+         * /proc.
+         */
+        nsret = setns(top, CLONE_NEWNS);
+        if (nsret != 0) {
+            perror("Failed to return to root namespace");
+            close(top);
+            return 1;
+        }
+    }
+    close(top);
+}
+
+static int
+scanMount(struct nslist **netHead, const char *mntnspath)
 {
     int res;
     struct stat stats;
     /* Look for nsfs mounts */
     FILE *mounts = fopen("/proc/mounts", "r");
     if (!mounts) {
-        perror("Couldn't open /proc/mounts");
+        if (mntnspath) {
+            fprintf(stderr, "Couldn't open /proc/mounts under %s: %s\n", mntnspath, strerror(errno));
+        } else {
+            fprintf(stderr, "Couldn't open /proc/mounts: %s\n", strerror(errno));
+        }
         errno = 0;
     } else {
         char *line;
@@ -261,8 +327,9 @@ scanMount(struct nslist **netHead)
                 *s = '\0';
                 res = stat(mountpoint, &stats);
                 if (res == 0) {
+                    //fprintf(stderr, "debug: checking path %s\n", mountpoint);
                     if (isNetNs(mountpoint)) {
-                        nslistAddUnique(netHead, stats.st_ino, 0, mountpoint);
+                        nslistAddUnique(netHead, stats.st_ino, 0, mountpoint, mntnspath);
                     }
                 }
             }
@@ -281,15 +348,19 @@ displayResults(struct nslist *netHead)
     struct nslist *list = netHead;
     while (list) {
         if (list->pid && list->path) {
-            printf("%lx (%li) via %i or %s\n", list->inode, list->inode, list->pid, list->path);
+            printf("%lx (%li) via %i or %s", list->inode, list->inode, list->pid, list->path);
         } else if (list->pid) {
-            printf("%lx (%li) via %i\n", list->inode, list->inode, list->pid);
+            printf("%lx (%li) via %i", list->inode, list->inode, list->pid);
         } else if (list->path) {
-            printf("%lx (%li) via %s\n", list->inode, list->inode, list->path);
+            printf("%lx (%li) via %s", list->inode, list->inode, list->path);
         } else {
             /* shouldn't reach here */
-            printf("%lx (%li) via <unknown>\n", list->inode, list->inode);
+            printf("%lx (%li) via <unknown>", list->inode, list->inode);
         }
+        if (list->mntnspath) {
+            printf(" (via %s)", list->mntnspath);
+        }
+        printf("\n");
         list = list->next;
     }
 }
@@ -304,6 +375,9 @@ cleanNsList(struct nslist **listHead)
         list = list->next;
         if (last->path) {
             free(last->path);
+        }
+        if (last->mntnspath) {
+            free(last->mntnspath);
         }
         free(last);
     }
